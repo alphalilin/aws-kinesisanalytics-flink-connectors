@@ -306,30 +306,42 @@ public class FirehoseProducer<O extends UserRecordResult, R extends Record> impl
         }
     }
 
-    private void submitBatchWithRetry(final Queue<Record> records) throws AmazonKinesisFirehoseException,
+    protected void submitBatchWithRetry(Queue<Record> records) throws AmazonKinesisFirehoseException,
             RecordCouldNotBeSentException {
 
         PutRecordBatchResult lastResult;
         String warnMessage = null;
+        Queue<Record> failureRecords = new ArrayDeque<>();
+        int totalSubmitted = 0;
         for (int attempts = 0; attempts < numberOfRetries; attempts++) {
             try {
-                LOGGER.debug("Trying to flush Buffer of size: {} on attempt: {}", records.size(), attempts);
+                if (failureRecords.size() > 0) {
+                    LOGGER.debug("Retrying to flush failure Buffer of size: {} on attempt: {}" ,
+                            failureRecords.size(), attempts);
+                    records = failureRecords;
+                } else {
+                    LOGGER.debug("Trying to flush Buffer of size: {} on attempt: {}", records.size(), attempts);
+                }
 
                 lastResult = submitBatch(records);
+                totalSubmitted += records.size() -
+                        (lastResult.getFailedPutCount() != null ? lastResult.getFailedPutCount() : 0);
 
                 if (lastResult.getFailedPutCount() == null || lastResult.getFailedPutCount() == 0) {
 
                     lastSucceededFlushTimestamp = System.nanoTime();
-                    LOGGER.debug("Firehose Buffer has been flushed with size: {} on attempt: {}",
-                            records.size(), attempts);
+                    LOGGER.debug("Firehose Buffer has been flushed with size: {} on {} attempts ",
+                            totalSubmitted, attempts + 1);
                     return;
                 }
 
+                failureRecords = getFailedPutRecords(lastResult, records);
                 PutRecordBatchResponseEntry failedRecord = lastResult.getRequestResponses()
                         .stream()
                         .filter(r -> r.getRecordId() == null)
                         .findFirst()
                         .orElse(null);
+
 
                 warnMessage = String.format("Number of failed records: %s.", lastResult.getFailedPutCount());
                 if (failedRecord != null) {
@@ -353,6 +365,8 @@ public class FirehoseProducer<O extends UserRecordResult, R extends Record> impl
                 throw ex;
             }
         }
+        LOGGER.debug("Firehose Buffer has been flushed with size: {} on {} total retries ",
+                totalSubmitted , numberOfRetries);
 
         throw new RecordCouldNotBeSentException("Exceeded number of attempts! " + warnMessage);
     }
@@ -362,7 +376,7 @@ public class FirehoseProducer<O extends UserRecordResult, R extends Record> impl
      * @param records a Collection of records
      * @return {@code PutRecordBatchResult}
      */
-    private PutRecordBatchResult submitBatch(final Queue<Record> records) throws AmazonKinesisFirehoseException {
+    protected PutRecordBatchResult submitBatch(final Queue<Record> records) throws AmazonKinesisFirehoseException {
 
         LOGGER.debug("Sending {} records to Kinesis Firehose on stream: {}", records.size(),
                 deliveryStream);
@@ -378,6 +392,23 @@ public class FirehoseProducer<O extends UserRecordResult, R extends Record> impl
         return result;
     }
 
+    /**
+     * Get the failure records from last submit result.
+     * @param result The result from the latest submission.
+     * @param submittedRecords The records submitted latest.
+     * @return failure records collection.
+     */
+    private Queue<Record> getFailedPutRecords(PutRecordBatchResult result,
+                                              Queue<Record> submittedRecords) {
+        Queue<Record> queue = new ArrayDeque<>();
+        Object[] records = submittedRecords.toArray();
+        for (int i = 0 ; i < result.getRequestResponses().size() ; i++) {
+            if (result.getRequestResponses().get(i).getRecordId() == null) {
+                queue.offer((Record)records[i]);
+            }
+        }
+        return queue;
+    }
     /**
      * Make sure that any pending scheduled thread terminates before closing as well as cleans the producerBuffer pool,
      * allowing GC to collect.

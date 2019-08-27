@@ -17,9 +17,7 @@ import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Properties;
+import java.util.*;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -30,9 +28,8 @@ import static com.amazonaws.services.kinesisanalytics.flink.connectors.config.Pr
 import static com.amazonaws.services.kinesisanalytics.flink.connectors.producer.impl.FirehoseProducer.UserRecordResult;
 import static com.amazonaws.services.kinesisanalytics.flink.connectors.testutils.TestUtils.DEFAULT_DELIVERY_STREAM;
 import static org.mockito.Matchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.times;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
@@ -212,6 +209,36 @@ public class FirehoseProducerTest {
         assertEquals(firehoseProducer.getOutstandingRecordsCount(), DEFAULT_MAX_BUFFER_SIZE);
         assertTrue(firehoseProducer.isFlushFailed());
     }
+
+    /**
+     * This test is responsible for checking if it returns the failure records for the retry.
+     */
+    @Test
+    public void testFirehoseProducerSubmitRecordWithFailure()  {
+        PutRecordBatchResult failedResult = new PutRecordBatchResult()
+                .withFailedPutCount(1)
+                .withRequestResponses(new PutRecordBatchResponseEntry()
+                        .withErrorCode("500")
+                        .withErrorMessage("Service Unavailable"));
+        PutRecordBatchResult successResult = new PutRecordBatchResult();
+        when(firehoseClient.putRecordBatch(any(PutRecordBatchRequest.class)))
+                .thenReturn(failedResult)
+                .thenReturn(successResult);
+        Queue<Record> records = new ArrayDeque<>();
+        for (int i = 0; i < DEFAULT_MAX_BUFFER_SIZE; ++i) {
+            records.offer(new Record().withData(ByteBuffer.wrap(
+                    RandomStringUtils.randomAlphabetic(64).getBytes())));
+        }
+
+        ArgumentCaptor<Queue> argument = ArgumentCaptor.forClass(Queue.class);
+        FirehoseProducer<UserRecordResult, Record> producer = spy(firehoseProducer);
+        producer.submitBatchWithRetry(records);
+        verify(producer, times(2)).submitBatch(argument.capture());
+        List<Queue> queues = argument.getAllValues();
+        assertEquals(queues.get(0).size(), 500);
+        assertEquals(queues.get(1).size(), 1);
+    }
+
 
     private ListenableFuture<UserRecordResult> addRecord(final FirehoseProducer producer) {
         try {
