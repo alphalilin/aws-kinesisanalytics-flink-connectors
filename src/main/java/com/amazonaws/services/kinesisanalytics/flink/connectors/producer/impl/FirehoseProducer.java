@@ -342,7 +342,6 @@ public class FirehoseProducer<O extends UserRecordResult, R extends Record> impl
                         .findFirst()
                         .orElse(null);
 
-
                 warnMessage = String.format("Number of failed records: %s.", lastResult.getFailedPutCount());
                 if (failedRecord != null) {
                     warnMessage = String.format("Last Kinesis Firehose putRecordBath encountered an error and failed " +
